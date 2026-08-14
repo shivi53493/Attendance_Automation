@@ -33,7 +33,7 @@ jobs:
       - name: Run test spec
         run: npx playwright test tests/test_multistudent.spec.ts
         env:
-          HEADLESS: true
+          HEADLESS: false
           DRY_RUN: ${{ github.event.inputs.dry_run }}
 
       - name: Upload report
