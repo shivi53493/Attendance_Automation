@@ -31,7 +31,7 @@ jobs:
         run: npx playwright install --with-deps
 
       - name: Run test spec
-        run: npx playwright test tests/test-multi-student-attend-lectures.spec.ts
+        run: npx playwright test tests/test_multistudent.spec.ts
         env:
           HEADLESS: true
           DRY_RUN: ${{ github.event.inputs.dry_run }}
