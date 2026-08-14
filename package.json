@@ -1,0 +1,20 @@
+{
+  "name": "attendance-automation",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "attend": "npx playwright test tests/extract_lecture_links.spec.ts",
+    "dry-run": "set DRY_RUN=true && npx playwright test tests/extract_lecture_links.spec.ts"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "Automated lecture attendance system using Playwright",
+  "devDependencies": {
+    "@playwright/test": "^1.62.1",
+    "@types/node": "^26.2.0"
+  },
+  "dependencies": {
+    "dotenv": "^16.5.0"
+  }
+}
