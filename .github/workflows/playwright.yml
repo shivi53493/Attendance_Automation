@@ -1,27 +1,49 @@
-name: Playwright Tests
+name: Playwright Weekend Run
+
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+  schedule:
+    - cron: '55 3 * * 6,0'   # 9:25 AM IST, every Sat & Sun
+  workflow_dispatch:
+
 jobs:
-  test:
-    timeout-minutes: 60
+  student-attendance:
+    name: Attendance - ${{ matrix.student }}
+    timeout-minutes: 355      # just under GitHub's 360 min hard cap
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false        # one student's failure doesn't cancel the others
+      matrix:
+        student: [SUE019441, SUE315571, SUE871116]   # placeholder usernames, will confirm exact values
     steps:
-    - uses: actions/checkout@v4
-    - uses: actions/setup-node@v4
-      with:
-        node-version: lts/*
-    - name: Install dependencies
-      run: npm ci
-    - name: Install Playwright Browsers
-      run: npx playwright install --with-deps
-    - name: Run Playwright tests
-      run: npx playwright test
-    - uses: actions/upload-artifact@v4
-      if: ${{ !cancelled() }}
-      with:
-        name: playwright-report
-        path: playwright-report/
-        retention-days: 30
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+
+      - name: Generate students.csv from secret
+        run: printf '%s' "$STUDENTS_CSV" > students.csv
+        env:
+          STUDENTS_CSV: ${{ secrets.STUDENTS_CSV }}
+
+      - name: Run attendance for ${{ matrix.student }}
+        run: npx playwright test multi-student.spec.ts
+        env:
+          STUDENT_USERNAME: ${{ matrix.student }}
+          LMS_URL: ${{ secrets.LMS_URL }}
+          HEADLESS: true
+          DRY_RUN: false
+
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ matrix.student }}
+          path: playwright-report/
+          retention-days: 30

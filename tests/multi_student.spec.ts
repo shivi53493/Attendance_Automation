@@ -59,7 +59,7 @@ async function runForStudent(browser: Browser, student: StudentProfile): Promise
 test('Multi-student parallel lecture attendance', async ({ browser }) => {
   // Generous ceiling: several lectures x 15 min stay each, running in
   // parallel across students, plus login/scrape overhead.
-  test.setTimeout(2 * 60 * 60 * 1000); // 2 hours
+  test.setTimeout(6 * 60 * 60 * 1000); // 2 hours
 
   logger.divider();
   logger.info('🎓 Multi-Student Automated Lecture Attendance — Starting...');
