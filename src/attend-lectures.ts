@@ -10,7 +10,7 @@ import {
 import { joinTeamsMeeting, leaveTeamsMeeting } from './join-teams';
 import { logger as defaultLogger, Logger } from './logger';
 
-const MEETING_DURATION_MS = 5 * 60 * 1000; // stay in each meeting for 15 minutes
+const MEETING_DURATION_MS = 50 * 60 * 1000; // stay in each meeting for 50 minutes
 
 /**
  * Orchestrates attending all upcoming lectures by navigating the SAME tab
