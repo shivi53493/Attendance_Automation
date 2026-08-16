@@ -29,7 +29,7 @@ jobs:
         env:
           STUDENTS_CSV: ${{ secrets.STUDENTS_CSV }}
       - name: Run attendance for ${{ matrix.student }}
-        run: npx playwright test tests/multi_student.spec.ts
+        run: npx playwright test tests/extract_lecture_links.spec.ts
         env:
           STUDENT_USERNAME: ${{ matrix.student }}
           LMS_URL: ${{ secrets.LMS_URL }}
