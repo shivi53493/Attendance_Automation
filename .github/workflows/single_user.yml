@@ -1,0 +1,39 @@
+name: Playwright Single Student Run
+on:
+  schedule:
+    - cron: '55 3 * * 6,0'   # 9:25 AM IST, every Sat & Sun
+  workflow_dispatch:
+
+jobs:
+  student-attendance:
+    name: Attendance - Single Student
+    timeout-minutes: 355      # just under GitHub's 360 min hard cap
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Kolkata
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: lts/*
+      - name: Install dependencies
+        run: npm ci
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps
+      - name: Generate students.csv from secret
+        run: printf '%s' "$STUDENTS_CSV" > students.csv
+        env:
+          STUDENTS_CSV: ${{ secrets.STUDENTS_CSV }}
+      - name: Run attendance (single student)
+        run: npx playwright test tests/extract_lecture_links.spec.ts
+        env:
+          LMS_URL: ${{ secrets.LMS_URL }}
+          HEADLESS: true
+          DRY_RUN: false
+      - name: Upload report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-single-student
+          path: playwright-report/
+          retention-days: 30
