@@ -7,17 +7,6 @@ import { loadStudents } from '../src/students-loader';
 import { logger, createLogger } from '../src/logger';
 import { StudentProfile } from '../src/types';
 
-/**
- * Runs the complete pipeline (login -> scrape -> attend) for ONE student,
- * in its own isolated browser context so their session/cookies never mix
- * with another student's. Every log line is prefixed with the student's
- * label so interleaved parallel output can still be told apart.
- *
- * Failures are caught and logged here rather than thrown, so one
- * student's failure (bad credentials, expired link, etc.) never stops
- * the others — see how it's called in the test below via
- * Promise.allSettled.
- */
 async function runForStudent(browser: Browser, student: StudentProfile): Promise<void> {
   const log = createLogger(student.label);
   let context: BrowserContext | undefined;
@@ -31,10 +20,8 @@ async function runForStudent(browser: Browser, student: StudentProfile): Promise
     log.info(`   Mode: ${config.DRY_RUN ? '🧪 DRY RUN' : '🔴 LIVE'}`);
     log.divider();
 
-    // Step 1: Login to LMS with this student's own credentials
     await loginToLMS(page, student.username, student.password, log);
 
-    // Step 2: Scrape today's lecture schedule from this student's dashboard
     const lectures = await scrapeLectures(page, log);
 
     if (lectures.length === 0) {
@@ -42,13 +29,12 @@ async function runForStudent(browser: Browser, student: StudentProfile): Promise
       return;
     }
 
-    // Step 3: Attend lectures, filling this student's own display name
     await attendLectures(context, page, lectures, student.displayName, config.DRY_RUN, log);
 
     log.success(`🎉 Finished all lectures for ${student.username}`);
   } catch (err) {
     log.error(`Fatal error for ${student.username}: ${err}`);
-    throw err; // re-thrown so Promise.allSettled records it as 'rejected'
+    throw err;
   } finally {
     if (context) {
       await context.close();
@@ -57,23 +43,36 @@ async function runForStudent(browser: Browser, student: StudentProfile): Promise
 }
 
 test('Multi-student parallel lecture attendance', async ({ browser }) => {
-  // Generous ceiling: several lectures x 15 min stay each, running in
-  // parallel across students, plus login/scrape overhead.
-  test.setTimeout(6 * 60 * 60 * 1000); // 2 hours
+  test.setTimeout(6 * 60 * 60 * 1000);
 
   logger.divider();
   logger.info('🎓 Multi-Student Automated Lecture Attendance — Starting...');
   logger.info(`   Mode: ${config.DRY_RUN ? '🧪 DRY RUN' : '🔴 LIVE'}`);
   logger.divider();
 
-  const students = loadStudents(config.STUDENTS_CSV_PATH);
+  let students = loadStudents(config.STUDENTS_CSV_PATH);
+
+  // If STUDENT_USERNAME is set (as it is in the GitHub Actions matrix),
+  // restrict this run to ONLY that student. This is what makes the
+  // matrix strategy actually isolate one student per job/runner instead
+  // of every job redundantly running all students in parallel and
+  // starving the runner's CPU/RAM.
+  const targetUsername = process.env.STUDENT_USERNAME?.trim();
+  if (targetUsername) {
+    students = students.filter((s) => s.username === targetUsername);
+    if (students.length === 0) {
+      throw new Error(
+        `STUDENT_USERNAME="${targetUsername}" was set but no matching row was found in ${config.STUDENTS_CSV_PATH}. ` +
+          `Check that the username in your STUDENTS_CSV secret exactly matches the matrix value.`
+      );
+    }
+    logger.info(`STUDENT_USERNAME filter active — running only for ${targetUsername}`);
+  }
+
   logger.info(`Loaded ${students.length} student(s) from ${config.STUDENTS_CSV_PATH}`);
   students.forEach((s, i) => logger.info(`  ${i + 1}. ${s.label} (${s.username})`));
   logger.divider();
 
-  // Fully parallel: every student's pipeline starts at (roughly) the same
-  // time, each in its own browser context. allSettled (not all()) so one
-  // student's rejection doesn't cancel/abort the others.
   const results = await Promise.allSettled(
     students.map((student) => runForStudent(browser, student))
   );
