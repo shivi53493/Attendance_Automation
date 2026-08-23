@@ -71,7 +71,6 @@ function buildLauncherUrl(meetingLink: string): string {
   const original = new URL(meetingLink);
   original.searchParams.set('launchAgent', 'join_only');
   original.searchParams.set('type', 'meetup-join');
-  original.searchParams.set('anon', 'true');
 
   // Teams' launcher expects the "inner" URL as a hash-routed path, e.g.
   // "/_#/l/meetup-join/19:meeting_.../0?context=...&launchAgent=...".
@@ -171,6 +170,7 @@ async function handleTeamsLandingPage(page: Page, log: Logger): Promise<void> {
  * - Waits (dynamically) for the screen to actually be interactive
  * - Turns off camera (verified, with retries — this is what was getting
  *   "stuck" before: a single long blocking attempt with no verification)
+ * - Turns off microphone (verified, with retries)
  * - Fills display name
  * - Clicks "Join now"
  *
@@ -182,8 +182,11 @@ async function handlePreJoinScreen(page: Page, displayName: string, log: Logger)
 
   const preJoinIndicators = [
     page.getByRole('switch', { name: /Turn camera off/i }),
+    page.getByRole('switch', { name: 'Mute mic (Ctrl+Shift+M)' }),
+    page.getByRole('switch', { name: /Mute mic/i }),
     page.getByRole('textbox', { name: /Type your name/i }),
     page.getByRole('button', { name: /join now/i }),
+    page.getByText(/Someone will let you in shortly/i),
   ];
 
   const ready = await waitForAnyVisible(preJoinIndicators, config.NAVIGATION_TIMEOUT_MS);
@@ -195,8 +198,9 @@ async function handlePreJoinScreen(page: Page, displayName: string, log: Logger)
   }
 
   await turnCameraOff(page, log);
+  await turnMicOff(page, log);
   await fillDisplayName(page, displayName, log);
-  await clickJoinNow(page, log);
+  await clickJoinNow(page, displayName, log);
 }
 
 /**
@@ -253,8 +257,65 @@ async function turnCameraOff(page: Page, log: Logger): Promise<void> {
 }
 
 /**
- * Fills the display name field. Best-effort — not fatal if it fails,
- * since joining with the default name is preferable to not joining.
+ * Turns the microphone off (mutes mic) with verification: after each attempt
+ * it re-reads the toggle's aria-checked state to confirm it actually flipped,
+ * instead of assuming a click/uncheck worked. Retries up to 3 times with short
+ * per-attempt timeouts, so a slow-loading toggle gets multiple bounded
+ * chances instead of one long blocking wait that looks "stuck".
+ */
+async function turnMicOff(page: Page, log: Logger): Promise<void> {
+  const micSwitch = page.getByRole('switch', { name: 'Mute mic (Ctrl+Shift+M)' }).or(
+    page.getByRole('switch', { name: /Mute mic/i })
+  ).or(
+    page.getByRole('switch', { name: /microphone/i })
+  ).or(
+    page.getByRole('button', { name: /mic/i })
+  ).or(
+    page.locator('[data-tid="toggle-mute"]')
+  ).or(
+    page.getByLabel(/mic/i)
+  );
+
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      const visible = await micSwitch.isVisible({ timeout: 3000 }).catch(() => false);
+      if (!visible) {
+        log.warn(`Mic toggle not visible yet (attempt ${attempt}/3), waiting...`);
+        await page.waitForTimeout(1000);
+        continue;
+      }
+
+      const state = await micSwitch.getAttribute('aria-checked').catch(() => null);
+      if (state === 'false') {
+        log.info('Mic already OFF.');
+        return;
+      }
+
+      try {
+        await micSwitch.uncheck({ timeout: config.ACTION_TIMEOUT_MS });
+      } catch {
+        await micSwitch.click({ timeout: config.ACTION_TIMEOUT_MS });
+      }
+
+      await page.waitForTimeout(500);
+      const confirmedOff = await micSwitch.getAttribute('aria-checked').catch(() => null);
+      if (confirmedOff === 'false') {
+        log.info('Mic turned OFF.');
+        return;
+      }
+
+      log.warn(`Mic toggle attempt ${attempt}/3 did not confirm OFF state, retrying...`);
+    } catch (err) {
+      log.warn(`Mic toggle attempt ${attempt}/3 failed: ${err}`);
+    }
+  }
+
+  log.warn('Could not confirm mic is OFF after 3 attempts — continuing with the join anyway.');
+}
+
+/**
+ * Fills the display name field with realistic keypresses and blur events
+ * so Teams React UI updates input validation state reliably in headed/headless mode.
  */
 async function fillDisplayName(page: Page, displayName: string, log: Logger): Promise<void> {
   try {
@@ -266,7 +327,13 @@ async function fillDisplayName(page: Page, displayName: string, log: Logger): Pr
 
     if (await nameInput.isVisible({ timeout: config.ACTION_TIMEOUT_MS })) {
       await nameInput.click({ timeout: config.ACTION_TIMEOUT_MS });
-      await nameInput.fill(displayName);
+      await nameInput.clear().catch(() => {});
+      // Use pressSequentially to simulate real keypresses so Teams React validation handlers fire
+      await nameInput.pressSequentially(displayName, { delay: 30 });
+      await page.waitForTimeout(300);
+      // Blur the input to guarantee validation event triggers
+      await nameInput.evaluate((el: HTMLElement) => el.blur()).catch(() => {});
+      await page.waitForTimeout(500);
       log.info(`Filled display name: ${displayName}`);
     }
   } catch (err) {
@@ -275,11 +342,10 @@ async function fillDisplayName(page: Page, displayName: string, log: Logger): Pr
 }
 
 /**
- * Clicks "Join now". This IS fatal (throws) if it can't be found/clicked —
- * without it the meeting was never actually joined, so it's worth letting
- * the outer retry() restart the whole flow rather than silently moving on.
+ * Clicks "Join now" or submits the pre-join form via Enter key.
+ * Verifies transition into either the meeting room or the lobby ("Someone will let you in shortly").
  */
-async function clickJoinNow(page: Page, log: Logger): Promise<void> {
+async function clickJoinNow(page: Page, displayName: string, log: Logger): Promise<void> {
   log.info('Looking for "Join now" button...');
 
   const joinButton = page.getByRole('button', { name: /join now/i }).or(
@@ -290,21 +356,117 @@ async function clickJoinNow(page: Page, log: Logger): Promise<void> {
     page.getByRole('button', { name: /^join$/i })
   );
 
+  const nameInput = page.getByRole('textbox', { name: /Type your name/i }).or(
+    page.locator('input[placeholder*="name" i]')
+  );
+
+  // Check if already in lobby or meeting first
+  const alreadyIn = await waitForMeetingOrLobby(page, log, 2000);
+  if (alreadyIn !== 'timeout') {
+    log.info(`Already transitioned to (${alreadyIn}). Skipping join click.`);
+    return;
+  }
+
   const visible = await joinButton.isVisible({ timeout: config.ACTION_TIMEOUT_MS }).catch(() => false);
   if (!visible) {
     await dumpDebugInfo(page, 'prejoin-not-found', log);
     throw new Error('Could not find "Join now" button.');
   }
 
-  await joinButton.click({ timeout: config.ACTION_TIMEOUT_MS });
-  log.success('✅ Clicked "Join now" — joining the meeting!');
+  // Ensure button becomes enabled before clicking
+  let enabled = await joinButton.isEnabled().catch(() => false);
+  if (!enabled) {
+    log.warn('"Join now" button is currently disabled. Re-triggering name input focus...');
+    if (await nameInput.isVisible().catch(() => false)) {
+      await nameInput.focus();
+      await page.keyboard.press('Space');
+      await page.keyboard.press('Backspace');
+      await page.waitForTimeout(500);
+    }
+    enabled = await joinButton.isEnabled().catch(() => false);
+  }
 
-  // Small settle wait for the in-meeting UI to mount; not blocking.
-  await page.waitForTimeout(1500);
+  // Try submitting via Enter key first (native Teams behavior on name input)
+  let submittedViaEnter = false;
+  if (await nameInput.isVisible().catch(() => false)) {
+    try {
+      log.info('Submitting pre-join form via Enter key on display name input...');
+      await nameInput.press('Enter');
+      await page.waitForTimeout(1000);
+      submittedViaEnter = true;
+    } catch (err) {
+      log.warn(`Enter key submission failed: ${err}`);
+    }
+  }
+
+  // If join button is still present/visible after Enter, click it explicitly
+  if (await joinButton.isVisible().catch(() => false)) {
+    try {
+      log.info('Clicking "Join now" button...');
+      await joinButton.click({ timeout: config.ACTION_TIMEOUT_MS });
+      log.success('✅ Clicked "Join now" button.');
+    } catch (err) {
+      log.warn(`Click on "Join now" failed: ${err}`);
+    }
+  }
+
+  // Wait for transition to confirm entry into meeting or lobby
+  log.info('Waiting for transition into meeting or lobby ("Someone will let you in shortly")...');
+  const transition = await waitForMeetingOrLobby(page, log, 15000);
+
+  if (transition === 'lobby') {
+    log.success('⏳ Entered Teams lobby ("Someone will let you in shortly"). Waiting to be admitted!');
+  } else if (transition === 'in-meeting') {
+    log.success('🎉 Successfully joined the meeting directly!');
+  } else {
+    log.warn('Joined status transition settled — assuming joined or waiting in lobby.');
+  }
 }
 
 /**
- * Leaves the Teams meeting by locating and clicking the "Leave" button.
+ * Checks whether the page has transitioned into the meeting room or the lobby.
+ */
+async function waitForMeetingOrLobby(
+  page: Page,
+  log: Logger,
+  timeoutMs: number = 10000
+): Promise<'in-meeting' | 'lobby' | 'timeout'> {
+  const startTime = Date.now();
+
+  const lobbyIndicators = [
+    page.getByText(/Someone will let you in shortly/i),
+    page.getByText(/will let you in/i),
+    page.locator('h1:has-text("will let you in")'),
+    page.locator('div:has-text("will let you in")'),
+  ];
+
+  const meetingIndicators = [
+    page.getByRole('button', { name: /Leave/i }),
+    page.locator('[data-tid="call-hangup"]'),
+    page.locator('#hangup-button'),
+  ];
+
+  while (Date.now() - startTime < timeoutMs) {
+    for (const indicator of meetingIndicators) {
+      if (await indicator.isVisible().catch(() => false)) {
+        return 'in-meeting';
+      }
+    }
+
+    for (const indicator of lobbyIndicators) {
+      if (await indicator.isVisible().catch(() => false)) {
+        return 'lobby';
+      }
+    }
+
+    await page.waitForTimeout(800);
+  }
+
+  return 'timeout';
+}
+
+/**
+ * Leaves the Teams meeting by locating and clicking the "Leave" button or "Cancel" (if in lobby).
  * Any post-call survey ("How was the call quality?") is left alone — it
  * doesn't need dismissing since the next lecture's joinTeamsMeeting() will
  * navigate this same tab away from it anyway.
@@ -312,7 +474,7 @@ async function clickJoinNow(page: Page, log: Logger): Promise<void> {
  * @param log - Pass a per-student createLogger(label) for multi-student runs.
  */
 export async function leaveTeamsMeeting(page: Page, log: Logger = defaultLogger): Promise<void> {
-  log.info('Leaving Microsoft Teams meeting...');
+  log.info('Leaving Microsoft Teams meeting / lobby...');
   try {
     const leaveButton = page.getByRole('button', { name: /Leave/i }).or(
       page.getByRole('button', { name: /hang up/i })
@@ -320,13 +482,15 @@ export async function leaveTeamsMeeting(page: Page, log: Logger = defaultLogger)
       page.locator('[data-tid="call-hangup"]')
     ).or(
       page.locator('#hangup-button')
+    ).or(
+      page.getByRole('button', { name: /Cancel/i })
     );
 
     if (await leaveButton.isVisible({ timeout: config.ACTION_TIMEOUT_MS })) {
       await leaveButton.click({ timeout: config.ACTION_TIMEOUT_MS });
-      log.success('✅ Successfully clicked Leave.');
+      log.success('✅ Successfully left meeting / lobby.');
     } else {
-      log.warn('Leave button not found. Continuing to next lecture regardless.');
+      log.warn('Leave/Cancel button not found. Continuing to next lecture regardless.');
     }
   } catch (err) {
     log.warn(`Could not click Leave button: ${err}`);

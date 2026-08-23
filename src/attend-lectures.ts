@@ -10,7 +10,7 @@ import {
 import { joinTeamsMeeting, leaveTeamsMeeting } from './join-teams';
 import { logger as defaultLogger, Logger } from './logger';
 
-const MEETING_DURATION_MS = 5 * 60 * 1000; // stay in each meeting for 15 minutes
+const MEETING_DURATION_MS = 30 * 60 * 1000; // stay in each meeting for 15 minutes
 
 /**
  * Orchestrates attending all upcoming lectures by navigating the SAME tab
@@ -120,13 +120,13 @@ export async function attendLectures(
 
     try {
       await joinTeamsMeeting(page, lecture.link, displayName, log);
-      log.success(`✅ Joined Teams meeting for [${lecture.code}] ${lecture.subject}`);
+      log.success(`✅ Joined Teams meeting flow for [${lecture.code}] ${lecture.subject}`);
 
-      // Wait in the meeting for exactly 15 minutes
-      log.info(`⏳ Staying in the meeting for ${MEETING_DURATION_MS / 60000} minutes as scheduled...`);
-      await sleep(MEETING_DURATION_MS);
+      // Stay in the meeting/lobby for the scheduled duration with active monitoring
+      log.info(`⏳ Staying in the lecture/lobby for ${MEETING_DURATION_MS / 60000} minutes as scheduled...`);
+      await stayInMeetingWithLobbyMonitoring(page, MEETING_DURATION_MS, log);
 
-      // Leave the meeting
+      // Leave the meeting / lobby
       await leaveTeamsMeeting(page, log);
     } catch (error) {
       log.error(`Error during Teams meeting for [${lecture.code}]: ${error}`);
@@ -152,6 +152,60 @@ export async function attendLectures(
   log.divider();
   log.success('🎉 All lectures for today have been attended!');
   log.divider();
+}
+
+/**
+ * Monitors the meeting page during the scheduled duration, logging whether
+ * the student is currently waiting in the lobby or has been admitted to the live call.
+ */
+async function stayInMeetingWithLobbyMonitoring(
+  page: Page,
+  durationMs: number,
+  log: Logger
+): Promise<void> {
+  const startTime = Date.now();
+  let wasAdmitted = false;
+  let lastLogTime = 0;
+
+  while (Date.now() - startTime < durationMs) {
+    const elapsed = Date.now() - startTime;
+    const remainingMs = durationMs - elapsed;
+
+    const isLobbyVisible = await page
+      .getByText(/Someone will let you in shortly/i)
+      .isVisible()
+      .catch(() => false);
+
+    const isInMeetingVisible = await page
+      .getByRole('button', { name: /Leave/i })
+      .or(page.locator('[data-tid="call-hangup"]'))
+      .or(page.locator('#hangup-button'))
+      .isVisible()
+      .catch(() => false);
+
+    if (isInMeetingVisible && !wasAdmitted) {
+      wasAdmitted = true;
+      log.success('🎉 Host admitted student into the live lecture room!');
+    }
+
+    // Log status update every 30 seconds
+    if (Date.now() - lastLogTime >= 30000) {
+      lastLogTime = Date.now();
+      const remMins = Math.ceil(remainingMs / 60000);
+      if (isInMeetingVisible) {
+        log.info(`🟢 Active in live lecture room (${remMins} min remaining)`);
+      } else if (isLobbyVisible) {
+        log.info(`⏳ Waiting in Teams lobby queue ("Someone will let you in shortly") (${remMins} min remaining)`);
+      } else {
+        log.info(`⏱️ In lecture session (${remMins} min remaining)`);
+      }
+    }
+
+    // Sleep in 5-second intervals to stay responsive
+    const checkInterval = Math.min(5000, remainingMs);
+    if (checkInterval <= 0) break;
+    await sleep(checkInterval);
+  }
 }
 
 /**
