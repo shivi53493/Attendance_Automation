@@ -1,46 +1,46 @@
-name: Playwright Manual Test Run
+# name: Playwright Manual Test Run
 
-on:
-  workflow_dispatch:
-    inputs:
-      dry_run:
-        description: 'Dry run (no real join)?'
-        required: true
-        default: 'true'
-        type: choice
-        options:
-          - 'true'
-          - 'false'
+# on:
+#   workflow_dispatch:
+#     inputs:
+#       dry_run:
+#         description: 'Dry run (no real join)?'
+#         required: true
+#         default: 'true'
+#         type: choice
+#         options:
+#           - 'true'
+#           - 'false'
 
-jobs:
-  test-multi-student:
-    name: Test Multi-Student Flow
-    timeout-minutes: 100     # covers the 90-min internal test.setTimeout + buffer
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+# jobs:
+#   test-multi-student:
+#     name: Test Multi-Student Flow
+#     timeout-minutes: 100     # covers the 90-min internal test.setTimeout + buffer
+#     runs-on: ubuntu-latest
+#     steps:
+#       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: lts/*
+#       - uses: actions/setup-node@v4
+#         with:
+#           node-version: lts/*
 
-      - name: Install dependencies
-        run: npm ci
+#       - name: Install dependencies
+#         run: npm ci
 
-      - name: Install Playwright browsers
-        run: npx playwright install --with-deps
+#       - name: Install Playwright browsers
+#         run: npx playwright install --with-deps
 
-      - name: Run test spec
-        run: npx playwright test tests/test_multistudent.spec.ts
-        env:
-          TZ: Asia/Kolkata
-          HEADLESS: false
-          DRY_RUN: ${{ github.event.inputs.dry_run }}
+#       - name: Run test spec
+#         run: npx playwright test tests/test_multistudent.spec.ts
+#         env:
+#           TZ: Asia/Kolkata
+#           HEADLESS: false
+#           DRY_RUN: ${{ github.event.inputs.dry_run }}
 
-      - name: Upload report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: playwright-report-test
-          path: playwright-report/
-          retention-days: 7
+#       - name: Upload report
+#         if: always()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: playwright-report-test
+#           path: playwright-report/
+#           retention-days: 7
