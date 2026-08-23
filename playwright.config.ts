@@ -46,6 +46,9 @@ export default defineConfig({
 
   /* Shared settings */
   use: {
+    /* Set timezone to IST */
+    timezoneId: 'Asia/Kolkata',
+
     /* Run in headed mode so Teams can open visually */
     headless: process.env.HEADLESS === 'true',
 

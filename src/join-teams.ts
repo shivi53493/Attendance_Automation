@@ -46,12 +46,10 @@ export async function joinTeamsMeeting(
       // Defensive safety net only: suppressPrompt=true should prevent the
       // native "Open Microsoft Teams?" dialog outright. If Teams ever
       // ignores the param, Escape is the only way to dismiss it — that
-      // dialog is browser chrome, not a page element, so no locator can
       // click it.
       await dismissExternalProtocolDialog(page);
-
       await handleTeamsLandingPage(page, log);
-      await handlePreJoinScreen(page, displayName, log);
+      await handlePreJoinScreen(page, launcherUrl, displayName, log);
     },
     {
       retries: config.MAX_RETRIES,
@@ -100,7 +98,7 @@ async function dismissExternalProtocolDialog(page: Page): Promise<void> {
     } catch {
       // ignore — dialog likely wasn't present
     }
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(5000);
   }
 }
 
@@ -166,26 +164,213 @@ async function handleTeamsLandingPage(page: Page, log: Logger): Promise<void> {
 }
 
 /**
- * Handles the Teams pre-join screen:
- * - Waits (dynamically) for the screen to actually be interactive
- * - Turns off camera (verified, with retries — this is what was getting
- *   "stuck" before: a single long blocking attempt with no verification)
- * - Turns off microphone (verified, with retries)
- * - Fills display name
- * - Clicks "Join now"
- *
- * Throws if the pre-join screen never loads or "Join now" is never found,
- * so the outer retry() in joinTeamsMeeting() restarts the whole flow.
+ * Performs Microsoft Teams step-by-step sign in flow strictly by clicking UI elements:
+ * 1. Click "Sign in" button
+ * 2. Fill email (sk0542759@gmail.com) & click Next
+ * 3. Wait until URL contains "login.live.com"
+ * 4. Press Escape to close any FIDO/Passkey popup
+ * 5. Click "Other ways to sign in" button (waiting for networkidle)
+ * 6. Click "Use your password" button (waiting for networkidle)
+ * 7. Fill password (SHivAM@#4321) & click primaryButton
+ * 8. Click primaryButton again (for "Stay signed in?" prompt)
  */
-async function handlePreJoinScreen(page: Page, displayName: string, log: Logger): Promise<void> {
-  log.info('Waiting for pre-join screen to become interactive...');
+async function performTeamsSignIn(page: Page, log: Logger): Promise<void> {
+  log.info('Step 1: Looking for "Sign in" button...');
+  const signInBtn = page.getByRole('button', { name: 'Sign in' }).or(
+    page.getByRole('button', { name: /sign in/i })
+  );
+  if (await signInBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+    log.info('Clicking "Sign in" button...');
+    await signInBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+    await page.waitForLoadState('domcontentloaded').catch(() => {});
+  }
+
+  log.info('Step 2: Entering email...');
+  const emailInput = page.getByTestId('emailInput').or(
+    page.locator('input[type="email"]')
+  ).or(
+    page.getByRole('textbox', { name: /email/i })
+  ).or(
+    page.locator('input[name="loginfmt"]')
+  );
+  await emailInput.waitFor({ state: 'visible', timeout: config.ACTION_TIMEOUT_MS });
+  await emailInput.click();
+  const email = process.env.TEAMS_EMAIL || 'sk0542759@gmail.com';
+  await emailInput.fill(email);
+  await page.waitForTimeout(500);
+
+  log.info('Step 2b: Clicking Next button...');
+  const nextBtn = page.getByTestId('authLoginDialogNextButton').or(
+    page.locator('input[type="submit"]')
+  ).or(
+    page.getByRole('button', { name: /next/i })
+  ).or(
+    page.locator('#idSIButton9')
+  );
+  await nextBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+
+  log.info('Step 3: Waiting for URL to contain "login.live.com"...');
+  await page.waitForURL((url) => url.href.includes('login.live.com') || url.href.includes('login.microsoftonline.com'), {
+    timeout: config.NAVIGATION_TIMEOUT_MS,
+  }).catch((err) => {
+    log.warn(`URL wait notice: ${err}`);
+  });
+  await page.waitForLoadState('domcontentloaded').catch(() => {});
+  await page.waitForTimeout(1000);
+
+  log.info('Step 3b: Pressing Escape key to close passkey/FIDO popup...');
+  await page.keyboard.press('Escape');
+  await page.waitForTimeout(1000);
+
+  log.info('Step 4: Looking for "Other ways to sign in"...');
+  const otherWaysBtn = page.getByRole('button', { name: /Other ways to sign in/i }).or(
+    page.getByText(/Other ways to sign in/i)
+  ).or(
+    page.locator('a:has-text("Other ways to sign in")')
+  ).or(
+    page.locator('#otc-link, #cantAccessAccount, [data-bind*="otherWays"], #signInAnotherWay')
+  ).or(
+    page.getByRole('link', { name: /Other ways to sign in/i })
+  );
+
+  const hasOtherWays = await otherWaysBtn.isVisible({ timeout: 10000 }).catch(() => false);
+  if (hasOtherWays) {
+    log.info('Clicking "Other ways to sign in"...');
+    await otherWaysBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+      return page.waitForLoadState('domcontentloaded');
+    });
+    await page.waitForTimeout(1000);
+  } else {
+    log.info('"Other ways to sign in" not visible, checking password step directly...');
+  }
+
+  log.info('Step 5: Looking for "Use your password" option...');
+  const usePasswordBtn = page.locator('[aria-label="Use your password"]').or(
+    page.locator('span[role="button"]:has-text("Use your password")')
+  ).or(
+    page.locator('div[role="group"][aria-label="Use your password"]')
+  ).or(
+    page.locator('span.fui-Link:has-text("Use your password")')
+  ).or(
+    page.getByText('Use your password', { exact: true })
+  ).or(
+    page.locator('div').filter({ hasText: /^Use your password$/ })
+  ).or(
+    page.getByRole('button', { name: /Use your password/i })
+  ).or(
+    page.locator('#idA_PWD_SwitchToPassword')
+  );
+
+  const targetPasswordBtn = usePasswordBtn.first();
+  const hasUsePassword = await targetPasswordBtn.isVisible({ timeout: 10000 }).catch(() => false);
+  if (hasUsePassword) {
+    log.info('Found "Use your password" option. Clicking...');
+    try {
+      await targetPasswordBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+    } catch {
+      await targetPasswordBtn.click({ force: true, timeout: config.ACTION_TIMEOUT_MS });
+    }
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+      return page.waitForLoadState('domcontentloaded');
+    });
+    await page.waitForTimeout(1000);
+  } else {
+    log.info('"Use your password" option not visible (might already be on password screen)...');
+  }
+
+  log.info('Step 6: Entering password...');
+  const passwordInput = page.getByRole('textbox', { name: /Password/i }).or(
+    page.locator('input[type="password"]')
+  ).or(
+    page.locator('input[name="passwd"]')
+  ).or(
+    page.locator('#i0116, #i0118')
+  );
+
+  await passwordInput.waitFor({ state: 'visible', timeout: config.ACTION_TIMEOUT_MS });
+  await passwordInput.click();
+  await passwordInput.clear().catch(() => {});
+  const password = process.env.TEAMS_PASSWORD || 'SHivAM@#4321';
+  await passwordInput.pressSequentially(password, { delay: 20 });
+  await page.waitForTimeout(300);
+  await passwordInput.evaluate((el: HTMLElement) => el.blur()).catch(() => {});
+  await page.waitForTimeout(500);
+
+  log.info('Step 7: Submitting password via Primary Button / Enter key...');
+  const primaryBtn = page.locator('button[data-testid="primaryButton"]').or(
+    page.getByTestId('primaryButton')
+  ).or(
+    page.locator('button[type="submit"]')
+  ).or(
+    page.getByRole('button', { name: 'Next' })
+  ).or(
+    page.getByRole('button', { name: /sign in/i })
+  ).or(
+    page.locator('#idSIButton9')
+  );
+
+  const targetPrimaryBtn = primaryBtn.first();
+
+  // Try submitting via Enter key first
+  try {
+    log.info('Pressing Enter key on password field...');
+    await passwordInput.press('Enter');
+    await page.waitForTimeout(1000);
+  } catch (err) {
+    log.warn(`Enter key submission notice: ${err}`);
+  }
+
+  // Click primary button if still visible
+  if (await targetPrimaryBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
+    log.info('Clicking primary button ("Next" / "Sign in")...');
+    try {
+      await targetPrimaryBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+    } catch {
+      await targetPrimaryBtn.click({ force: true, timeout: config.ACTION_TIMEOUT_MS });
+    }
+  }
+
+  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+    return page.waitForLoadState('domcontentloaded');
+  });
+  await page.waitForTimeout(2000);
+
+  log.info('Step 8: Checking for "Stay signed in?" prompt...');
+  if (await targetPrimaryBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+    log.info('Confirming "Stay signed in?" prompt...');
+    try {
+      await targetPrimaryBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+    } catch {
+      await targetPrimaryBtn.click({ force: true, timeout: config.ACTION_TIMEOUT_MS });
+    }
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+      return page.waitForLoadState('domcontentloaded');
+    });
+    await page.waitForTimeout(2000);
+  }
+
+  log.success('🔑 Microsoft Teams sign-in flow completed via UI buttons.');
+}
+
+/**
+ * Handles the Teams pre-join screen:
+ * - Checks if "Sign in" button is present and performs button-driven authentication
+ * - After sign-in (or directly if already signed in), clicks ONLY "Join now" (skips camera/mic toggles & display name fill)
+ */
+async function handlePreJoinScreen(
+  page: Page,
+  launcherUrl: string,
+  displayName: string,
+  log: Logger
+): Promise<void> {
+  log.info('Waiting for pre-join screen / sign-in options...');
 
   const preJoinIndicators = [
-    page.getByRole('switch', { name: /Turn camera off/i }),
-    page.getByRole('switch', { name: 'Mute mic (Ctrl+Shift+M)' }),
-    page.getByRole('switch', { name: /Mute mic/i }),
-    page.getByRole('textbox', { name: /Type your name/i }),
+    page.getByRole('button', { name: 'Sign in' }),
+    page.getByRole('button', { name: /sign in/i }),
     page.getByRole('button', { name: /join now/i }),
+    page.getByRole('button', { name: /join meeting/i }),
     page.getByText(/Someone will let you in shortly/i),
   ];
 
@@ -197,9 +382,21 @@ async function handlePreJoinScreen(page: Page, displayName: string, log: Logger)
     );
   }
 
-  await turnCameraOff(page, log);
-  await turnMicOff(page, log);
-  await fillDisplayName(page, displayName, log);
+  const signInBtn = page.getByRole('button', { name: 'Sign in' }).or(
+    page.getByRole('button', { name: /sign in/i })
+  );
+
+  if (await signInBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
+    log.info('🔑 "Sign in" button detected. Executing Teams sign-in procedure via UI buttons...');
+    await performTeamsSignIn(page, log);
+
+    // Wait for natural redirect or handle landing button if shown again
+    await page.waitForLoadState('domcontentloaded', { timeout: config.NAVIGATION_TIMEOUT_MS }).catch(() => {});
+    await handleTeamsLandingPage(page, log);
+  }
+
+  // Per user instruction:
+  // After successful sign in, ONLY click "Join now" button (no filling name, no camera off, no mic off)
   await clickJoinNow(page, displayName, log);
 }
 
@@ -224,7 +421,7 @@ async function turnCameraOff(page: Page, log: Logger): Promise<void> {
       const visible = await cameraSwitch.isVisible({ timeout: 3000 }).catch(() => false);
       if (!visible) {
         log.warn(`Camera toggle not visible yet (attempt ${attempt}/3), waiting...`);
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(5000);
         continue;
       }
 
@@ -240,7 +437,7 @@ async function turnCameraOff(page: Page, log: Logger): Promise<void> {
         await cameraSwitch.click({ timeout: config.ACTION_TIMEOUT_MS });
       }
 
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(5000);
       const confirmedOff = await cameraSwitch.getAttribute('aria-checked').catch(() => null);
       if (confirmedOff === 'false') {
         log.info('Camera turned OFF.');
@@ -278,10 +475,10 @@ async function turnMicOff(page: Page, log: Logger): Promise<void> {
 
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
-      const visible = await micSwitch.isVisible({ timeout: 3000 }).catch(() => false);
+      const visible = await micSwitch.isVisible({ timeout: 5000 }).catch(() => false);
       if (!visible) {
         log.warn(`Mic toggle not visible yet (attempt ${attempt}/3), waiting...`);
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(5000);
         continue;
       }
 
@@ -297,7 +494,7 @@ async function turnMicOff(page: Page, log: Logger): Promise<void> {
         await micSwitch.click({ timeout: config.ACTION_TIMEOUT_MS });
       }
 
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(5000);
       const confirmedOff = await micSwitch.getAttribute('aria-checked').catch(() => null);
       if (confirmedOff === 'false') {
         log.info('Mic turned OFF.');
@@ -330,10 +527,10 @@ async function fillDisplayName(page: Page, displayName: string, log: Logger): Pr
       await nameInput.clear().catch(() => {});
       // Use pressSequentially to simulate real keypresses so Teams React validation handlers fire
       await nameInput.pressSequentially(displayName, { delay: 30 });
-      await page.waitForTimeout(300);
+      await page.waitForTimeout(5000);
       // Blur the input to guarantee validation event triggers
       await nameInput.evaluate((el: HTMLElement) => el.blur()).catch(() => {});
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(5000);
       log.info(`Filled display name: ${displayName}`);
     }
   } catch (err) {
@@ -361,7 +558,7 @@ async function clickJoinNow(page: Page, displayName: string, log: Logger): Promi
   );
 
   // Check if already in lobby or meeting first
-  const alreadyIn = await waitForMeetingOrLobby(page, log, 2000);
+  const alreadyIn = await waitForMeetingOrLobby(page, log, 5000);
   if (alreadyIn !== 'timeout') {
     log.info(`Already transitioned to (${alreadyIn}). Skipping join click.`);
     return;
@@ -381,7 +578,7 @@ async function clickJoinNow(page: Page, displayName: string, log: Logger): Promi
       await nameInput.focus();
       await page.keyboard.press('Space');
       await page.keyboard.press('Backspace');
-      await page.waitForTimeout(500);
+      await page.waitForTimeout(5000);
     }
     enabled = await joinButton.isEnabled().catch(() => false);
   }
@@ -392,7 +589,7 @@ async function clickJoinNow(page: Page, displayName: string, log: Logger): Promi
     try {
       log.info('Submitting pre-join form via Enter key on display name input...');
       await nameInput.press('Enter');
-      await page.waitForTimeout(1000);
+      await page.waitForTimeout(5000);
       submittedViaEnter = true;
     } catch (err) {
       log.warn(`Enter key submission failed: ${err}`);
@@ -459,7 +656,7 @@ async function waitForMeetingOrLobby(
       }
     }
 
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(5000);
   }
 
   return 'timeout';

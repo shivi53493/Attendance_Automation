@@ -56,7 +56,7 @@ const TEST_LECTURES: Lecture[] = [
     link: 'https://teams.live.com/meet/9323796621135?p=vPdu9CqicwPEf6s8FX',
   },
 
-  
+
   {
     subject: 'Test Subject 2',
     code: 'TEST-2',
@@ -86,7 +86,7 @@ test('Test attendLectures flow with manually defined lecture data', async ({ pag
   logger.info(`   Mode: ${config.DRY_RUN ? '🧪 DRY RUN' : '🔴 LIVE'}`);
   logger.divider();
 
-  await attendLectures(context, page, TEST_LECTURES,'SUE019457 (SHIVAM KUMAR)', config.DRY_RUN);
+  await attendLectures(context, page, TEST_LECTURES, 'SUE019457 (SHIVAM KUMAR)', config.DRY_RUN);
 
   logger.info('🧪 Test run complete.');
 });
