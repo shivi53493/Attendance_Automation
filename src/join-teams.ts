@@ -197,7 +197,7 @@ async function performTeamsSignIn(page: Page, log: Logger): Promise<void> {
   await emailInput.click();
   const email = process.env.TEAMS_EMAIL || 'sk0542759@gmail.com';
   await emailInput.fill(email);
-  await page.waitForTimeout(500);
+  await page.waitForTimeout(5000);
 
   log.info('Step 2b: Clicking Next button...');
   const nextBtn = page.getByTestId('authLoginDialogNextButton').or(
@@ -216,11 +216,11 @@ async function performTeamsSignIn(page: Page, log: Logger): Promise<void> {
     log.warn(`URL wait notice: ${err}`);
   });
   await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(5000);
 
   log.info('Step 3b: Pressing Escape key to close passkey/FIDO popup...');
   await page.keyboard.press('Escape');
-  await page.waitForTimeout(1000);
+  await page.waitForTimeout(5000);
 
   log.info('Step 4: Looking for "Other ways to sign in"...');
   const otherWaysBtn = page.getByRole('button', { name: /Other ways to sign in/i }).or(
