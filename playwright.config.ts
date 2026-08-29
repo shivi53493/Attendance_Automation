@@ -70,6 +70,9 @@ export default defineConfig({
 
     launchOptions: {
       args: [
+        // Disable WebAuthn / Passkey OS popups so Microsoft Login defaults to password
+        '--disable-features=WebAuthentication,WebAuthenticationUI',
+        '--disable-webauthn',
         // Without a real webcam/mic, Teams' getUserMedia() can hang or
         // throw inside its own pre-join JS. These give Chromium a fake
         // device to enumerate so that code path completes normally,

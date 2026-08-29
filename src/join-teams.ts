@@ -33,6 +33,21 @@ export async function joinTeamsMeeting(
   displayName: string,
   log: Logger = defaultLogger
 ): Promise<void> {
+  // Prevent browser WebAuthn / Passkey OS popups from opening
+  await page.addInitScript(() => {
+    try {
+      if (navigator.credentials) {
+        navigator.credentials.get = () => Promise.reject(new DOMException('Passkeys disabled', 'NotSupportedError'));
+        navigator.credentials.create = () => Promise.reject(new DOMException('Passkeys disabled', 'NotSupportedError'));
+      }
+      Object.defineProperty(window, 'PublicKeyCredential', {
+        value: undefined,
+        writable: false,
+        configurable: true,
+      });
+    } catch (e) {}
+  }).catch(() => {});
+
   await retry(
     async () => {
       const launcherUrl = buildLauncherUrl(meetingLink);
@@ -45,8 +60,7 @@ export async function joinTeamsMeeting(
 
       // Defensive safety net only: suppressPrompt=true should prevent the
       // native "Open Microsoft Teams?" dialog outright. If Teams ever
-      // ignores the param, Escape is the only way to dismiss it — that
-      // click it.
+      // ignores the param, Escape is the only way to dismiss it.
       await dismissExternalProtocolDialog(page);
       await handleTeamsLandingPage(page, log);
       await handlePreJoinScreen(page, launcherUrl, displayName, log);
@@ -165,28 +179,46 @@ async function handleTeamsLandingPage(page: Page, log: Logger): Promise<void> {
 
 /**
  * Performs Microsoft Teams step-by-step sign in flow strictly by clicking UI elements:
- * 1. Click "Sign in" button
- * 2. Fill email (sk0542759@gmail.com) & click Next
- * 3. Wait until URL contains "login.live.com"
- * 4. Press Escape to close any FIDO/Passkey popup
- * 5. Click "Other ways to sign in" button (waiting for networkidle)
- * 6. Click "Use your password" button (waiting for networkidle)
- * 7. Fill password (SHivAM@#4321) & click primaryButton
- * 8. Click primaryButton again (for "Stay signed in?" prompt)
+ * 1. Click "Sign in" button (if present)
+ * 2. Fill email in "Email or phone number" field & click primaryButton (Next), waiting for networkidle
+ * 3. Click "Other ways to sign in" button, waiting for networkidle
+ * 4. Click "Use your password" button, waiting for networkidle
+ * 5. Fill password in "Password" field & click primaryButton (Sign in), waiting for networkidle
+ * 6. Click primaryButton again (for "Stay signed in?" prompt), waiting for networkidle
+ * 7. Click / wait on #loading-screen
  */
 async function performTeamsSignIn(page: Page, log: Logger): Promise<void> {
-  log.info('Step 1: Looking for "Sign in" button...');
+  // Prevent browser WebAuthn / Passkey OS popups from opening
+  await page.addInitScript(() => {
+    try {
+      if (navigator.credentials) {
+        navigator.credentials.get = () => Promise.reject(new DOMException('Passkeys disabled', 'NotSupportedError'));
+        navigator.credentials.create = () => Promise.reject(new DOMException('Passkeys disabled', 'NotSupportedError'));
+      }
+      Object.defineProperty(window, 'PublicKeyCredential', {
+        value: undefined,
+        writable: false,
+        configurable: true,
+      });
+    } catch (e) {}
+  }).catch(() => {});
+
+  log.info('Step 1: Checking for initial "Sign in" button on Teams landing...');
   const signInBtn = page.getByRole('button', { name: 'Sign in' }).or(
     page.getByRole('button', { name: /sign in/i })
   );
   if (await signInBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-    log.info('Clicking "Sign in" button...');
+    log.info('Clicking initial "Sign in" button...');
     await signInBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
-    await page.waitForLoadState('domcontentloaded').catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+      return page.waitForLoadState('domcontentloaded');
+    });
   }
 
-  log.info('Step 2: Entering email...');
-  const emailInput = page.getByTestId('emailInput').or(
+  log.info('Step 2: Entering email in "Email or phone number" field...');
+  const emailInput = page.getByRole('textbox', { name: 'Email or phone number' }).or(
+    page.getByTestId('emailInput')
+  ).or(
     page.locator('input[type="email"]')
   ).or(
     page.getByRole('textbox', { name: /email/i })
@@ -197,90 +229,76 @@ async function performTeamsSignIn(page: Page, log: Logger): Promise<void> {
   await emailInput.click();
   const email = process.env.TEAMS_EMAIL || 'sk0542759@gmail.com';
   await emailInput.fill(email);
-  await page.waitForTimeout(5000);
+  await page.waitForTimeout(300);
 
-  log.info('Step 2b: Clicking Next button...');
-  const nextBtn = page.getByTestId('authLoginDialogNextButton').or(
+  log.info('Step 2b: Clicking Primary Button (Next)...');
+  const primaryBtn = page.getByTestId('primaryButton').or(
+    page.locator('button[data-testid="primaryButton"]')
+  ).or(
     page.locator('input[type="submit"]')
   ).or(
     page.getByRole('button', { name: /next/i })
   ).or(
     page.locator('#idSIButton9')
   );
-  await nextBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
 
-  log.info('Step 3: Waiting for URL to contain "login.live.com"...');
-  await page.waitForURL((url) => url.href.includes('login.live.com') || url.href.includes('login.microsoftonline.com'), {
-    timeout: config.NAVIGATION_TIMEOUT_MS,
-  }).catch((err) => {
-    log.warn(`URL wait notice: ${err}`);
+  await primaryBtn.first().click({ timeout: config.ACTION_TIMEOUT_MS });
+  await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+    return page.waitForLoadState('domcontentloaded');
   });
-  await page.waitForLoadState('domcontentloaded').catch(() => {});
-  await page.waitForTimeout(5000);
+  await page.waitForTimeout(1000);
 
-  log.info('Step 3b: Pressing Escape key to close passkey/FIDO popup...');
-  await page.keyboard.press('Escape');
-  await page.waitForTimeout(5000);
+  // Send an Escape keypress defensively if any residual native window exists
+  await page.keyboard.press('Escape').catch(() => {});
 
-  log.info('Step 4: Looking for "Other ways to sign in"...');
-  const otherWaysBtn = page.getByRole('button', { name: /Other ways to sign in/i }).or(
-    page.getByText(/Other ways to sign in/i)
+  log.info('Step 3: Looking for "Other ways to sign in" button...');
+  const otherWaysBtn = page.getByRole('button', { name: 'Other ways to sign in' }).or(
+    page.getByRole('button', { name: /Other ways to sign in/i })
   ).or(
-    page.locator('a:has-text("Other ways to sign in")')
+    page.getByText('Other ways to sign in', { exact: false })
   ).or(
     page.locator('#otc-link, #cantAccessAccount, [data-bind*="otherWays"], #signInAnotherWay')
-  ).or(
-    page.getByRole('link', { name: /Other ways to sign in/i })
   );
 
-  const hasOtherWays = await otherWaysBtn.isVisible({ timeout: 10000 }).catch(() => false);
-  if (hasOtherWays) {
+  if (await otherWaysBtn.first().isVisible({ timeout: 7000 }).catch(() => false)) {
     log.info('Clicking "Other ways to sign in"...');
-    await otherWaysBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+    await otherWaysBtn.first().click({ timeout: config.ACTION_TIMEOUT_MS });
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
       return page.waitForLoadState('domcontentloaded');
     });
     await page.waitForTimeout(1000);
   } else {
-    log.info('"Other ways to sign in" not visible, checking password step directly...');
+    log.info('"Other ways to sign in" button not visible, checking for password screen directly...');
   }
 
-  log.info('Step 5: Looking for "Use your password" option...');
-  const usePasswordBtn = page.locator('[aria-label="Use your password"]').or(
-    page.locator('span[role="button"]:has-text("Use your password")')
-  ).or(
-    page.locator('div[role="group"][aria-label="Use your password"]')
-  ).or(
-    page.locator('span.fui-Link:has-text("Use your password")')
-  ).or(
-    page.getByText('Use your password', { exact: true })
-  ).or(
-    page.locator('div').filter({ hasText: /^Use your password$/ })
-  ).or(
+  log.info('Step 4: Looking for "Use your password" button...');
+  const usePasswordBtn = page.getByRole('button', { name: 'Use your password' }).or(
     page.getByRole('button', { name: /Use your password/i })
+  ).or(
+    page.getByText('Use your password', { exact: false })
   ).or(
     page.locator('#idA_PWD_SwitchToPassword')
   );
 
-  const targetPasswordBtn = usePasswordBtn.first();
-  const hasUsePassword = await targetPasswordBtn.isVisible({ timeout: 10000 }).catch(() => false);
-  if (hasUsePassword) {
-    log.info('Found "Use your password" option. Clicking...');
+  if (await usePasswordBtn.first().isVisible({ timeout: 7000 }).catch(() => false)) {
+    log.info('Clicking "Use your password"...');
     try {
-      await targetPasswordBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+      await usePasswordBtn.first().click({ timeout: config.ACTION_TIMEOUT_MS });
     } catch {
-      await targetPasswordBtn.click({ force: true, timeout: config.ACTION_TIMEOUT_MS });
+      await usePasswordBtn.first().click({ force: true, timeout: config.ACTION_TIMEOUT_MS });
     }
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
       return page.waitForLoadState('domcontentloaded');
     });
     await page.waitForTimeout(1000);
   } else {
-    log.info('"Use your password" option not visible (might already be on password screen)...');
+    log.info('"Use your password" option not visible, proceeding to password field...');
   }
 
-  log.info('Step 6: Entering password...');
-  const passwordInput = page.getByRole('textbox', { name: /Password/i }).or(
+  log.info('Step 5: Entering password in "Password" field...');
+  const passwordInput = page.getByRole('textbox', { name: 'Password' }).or(
+    page.getByRole('textbox', { name: /Password/i })
+  ).or(
     page.locator('input[type="password"]')
   ).or(
     page.locator('input[name="passwd"]')
@@ -292,57 +310,23 @@ async function performTeamsSignIn(page: Page, log: Logger): Promise<void> {
   await passwordInput.click();
   await passwordInput.clear().catch(() => {});
   const password = process.env.TEAMS_PASSWORD || 'SHivAM@#4321';
-  await passwordInput.pressSequentially(password, { delay: 20 });
+  await passwordInput.fill(password);
   await page.waitForTimeout(300);
-  await passwordInput.evaluate((el: HTMLElement) => el.blur()).catch(() => {});
-  await page.waitForTimeout(500);
 
-  log.info('Step 7: Submitting password via Primary Button / Enter key...');
-  const primaryBtn = page.locator('button[data-testid="primaryButton"]').or(
-    page.getByTestId('primaryButton')
-  ).or(
-    page.locator('button[type="submit"]')
-  ).or(
-    page.getByRole('button', { name: 'Next' })
-  ).or(
-    page.getByRole('button', { name: /sign in/i })
-  ).or(
-    page.locator('#idSIButton9')
-  );
-
-  const targetPrimaryBtn = primaryBtn.first();
-
-  // Try submitting via Enter key first
-  try {
-    log.info('Pressing Enter key on password field...');
-    await passwordInput.press('Enter');
-    await page.waitForTimeout(1000);
-  } catch (err) {
-    log.warn(`Enter key submission notice: ${err}`);
-  }
-
-  // Click primary button if still visible
-  if (await targetPrimaryBtn.isVisible({ timeout: 3000 }).catch(() => false)) {
-    log.info('Clicking primary button ("Next" / "Sign in")...');
-    try {
-      await targetPrimaryBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
-    } catch {
-      await targetPrimaryBtn.click({ force: true, timeout: config.ACTION_TIMEOUT_MS });
-    }
-  }
-
+  log.info('Step 6: Clicking Primary Button (Sign in)...');
+  await primaryBtn.first().click({ timeout: config.ACTION_TIMEOUT_MS });
   await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
     return page.waitForLoadState('domcontentloaded');
   });
   await page.waitForTimeout(2000);
 
-  log.info('Step 8: Checking for "Stay signed in?" prompt...');
-  if (await targetPrimaryBtn.isVisible({ timeout: 5000 }).catch(() => false)) {
-    log.info('Confirming "Stay signed in?" prompt...');
+  log.info('Step 7: Checking for "Stay signed in?" prompt Primary Button...');
+  if (await primaryBtn.first().isVisible({ timeout: 5000 }).catch(() => false)) {
+    log.info('Clicking Primary Button on "Stay signed in?" prompt...');
     try {
-      await targetPrimaryBtn.click({ timeout: config.ACTION_TIMEOUT_MS });
+      await primaryBtn.first().click({ timeout: config.ACTION_TIMEOUT_MS });
     } catch {
-      await targetPrimaryBtn.click({ force: true, timeout: config.ACTION_TIMEOUT_MS });
+      await primaryBtn.first().click({ force: true, timeout: config.ACTION_TIMEOUT_MS });
     }
     await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
       return page.waitForLoadState('domcontentloaded');
@@ -350,7 +334,17 @@ async function performTeamsSignIn(page: Page, log: Logger): Promise<void> {
     await page.waitForTimeout(2000);
   }
 
-  log.success('🔑 Microsoft Teams sign-in flow completed via UI buttons.');
+  log.info('Step 8: Checking for #loading-screen...');
+  const loadingScreen = page.locator('#loading-screen');
+  if (await loadingScreen.isVisible({ timeout: 5000 }).catch(() => false)) {
+    log.info('Clicking / waiting on #loading-screen...');
+    await loadingScreen.click().catch(() => {});
+    await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {
+      return page.waitForLoadState('domcontentloaded');
+    });
+  }
+
+  log.success('🔑 Microsoft Teams sign-in flow completed step-by-step.');
 }
 
 /**
