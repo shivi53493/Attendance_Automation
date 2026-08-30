@@ -37,10 +37,10 @@ function minutesFromNow(mins: number): Date {
 }
 
 /**
- * Each lecture's stay in-meeting is a fixed 15 minutes (MEETING_DURATION_MS
- * in attend-lectures.ts, unchanged). To see lecture N+1 kick off right as
- * lecture N is being left (instead of the script idling for a long gap),
- * space each startTime ~16 minutes after the previous one's startTime.
+ * Each lecture's stay in-meeting runs dynamically until lecture.endTime.
+ * To see lecture N+1 kick off right as lecture N is being left (instead of
+ * the script idling for a long gap), space each startTime appropriately after
+ * the previous one's endTime.
  *
  * Add/remove objects here freely — attendLectures() already loops over
  * however many you give it, in order, exactly like it would with a real

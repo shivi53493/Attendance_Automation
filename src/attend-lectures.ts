@@ -10,13 +10,11 @@ import {
 import { joinTeamsMeeting, leaveTeamsMeeting } from './join-teams';
 import { logger as defaultLogger, Logger } from './logger';
 
-const MEETING_DURATION_MS = 30 * 60 * 1000; // stay in each meeting for 15 minutes
-
 /**
  * Orchestrates attending all upcoming lectures by navigating the SAME tab
- * to each Teams link at the correct scheduled time, staying for 15
- * minutes, leaving, and moving to the next one. No new tabs are opened or
- * closed — joinTeamsMeeting() just navigates `page` in place.
+ * to each Teams link at the correct scheduled time, staying until each
+ * lecture's scheduled end time, leaving, and moving to the next one.
+ * No new tabs are opened or closed — joinTeamsMeeting() just navigates `page` in place.
  *
  * @param context - Playwright BrowserContext, used once up front to grant
  *   camera/mic permissions so the pre-join screen never hits a native
@@ -69,13 +67,14 @@ export async function attendLectures(
 
     upcomingLectures.forEach((lecture) => {
       const delay = getDelayUntil(lecture.startTime);
+      const stayDuration = getDelayUntil(lecture.endTime);
       if (delay > 0) {
         log.info(
-          `  Would wait ${formatDuration(delay)}, then open: [${lecture.code}] ${lecture.subject}`
+          `  Would wait ${formatDuration(delay)}, then open: [${lecture.code}] ${lecture.subject} (stay until ${formatTime(lecture.endTime)}, ~${formatDuration(stayDuration)})`
         );
       } else {
         log.info(
-          `  Would open NOW (already started): [${lecture.code}] ${lecture.subject}`
+          `  Would open NOW (already started): [${lecture.code}] ${lecture.subject} (stay until ${formatTime(lecture.endTime)}, ~${formatDuration(stayDuration)})`
         );
       }
     });
@@ -122,9 +121,19 @@ export async function attendLectures(
       await joinTeamsMeeting(page, lecture.link, displayName, log);
       log.success(`✅ Joined Teams meeting flow for [${lecture.code}] ${lecture.subject}`);
 
-      // Stay in the meeting/lobby for the scheduled duration with active monitoring
-      log.info(`⏳ Staying in the lecture/lobby for ${MEETING_DURATION_MS / 60000} minutes as scheduled...`);
-      await stayInMeetingWithLobbyMonitoring(page, MEETING_DURATION_MS, log);
+      // Calculate remaining duration until lecture end time
+      const remainingMs = getDelayUntil(lecture.endTime);
+
+      if (remainingMs > 0) {
+        log.info(
+          `⏳ Staying in the lecture/lobby until end time ${formatTime(lecture.endTime)} (${formatDuration(remainingMs)} remaining)...`
+        );
+        await stayInMeetingWithLobbyMonitoring(page, lecture.endTime, log);
+      } else {
+        log.warn(
+          `⚠️ Lecture end time (${formatTime(lecture.endTime)}) has already passed. Leaving meeting.`
+        );
+      }
 
       // Leave the meeting / lobby
       await leaveTeamsMeeting(page, log);
@@ -155,21 +164,19 @@ export async function attendLectures(
 }
 
 /**
- * Monitors the meeting page during the scheduled duration, logging whether
+ * Monitors the meeting page until `endTime`, logging whether
  * the student is currently waiting in the lobby or has been admitted to the live call.
  */
 async function stayInMeetingWithLobbyMonitoring(
   page: Page,
-  durationMs: number,
+  endTime: Date,
   log: Logger
 ): Promise<void> {
-  const startTime = Date.now();
   let wasAdmitted = false;
   let lastLogTime = 0;
 
-  while (Date.now() - startTime < durationMs) {
-    const elapsed = Date.now() - startTime;
-    const remainingMs = durationMs - elapsed;
+  while (Date.now() < endTime.getTime()) {
+    const remainingMs = Math.max(0, endTime.getTime() - Date.now());
 
     const isLobbyVisible = await page
       .getByText(/Someone will let you in shortly/i)
