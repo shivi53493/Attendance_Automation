@@ -252,13 +252,7 @@ async function performTeamsSignIn(page: Page, log: Logger): Promise<void> {
   await page.keyboard.press('Escape').catch(() => {});
 
   log.info('Step 3: Looking for "Other ways to sign in" button...');
-  const otherWaysBtn = page.getByRole('button', { name: 'Other ways to sign in' }).or(
-    page.getByRole('button', { name: /Other ways to sign in/i })
-  ).or(
-    page.getByText('Other ways to sign in', { exact: false })
-  ).or(
-    page.locator('#otc-link, #cantAccessAccount, [data-bind*="otherWays"], #signInAnotherWay')
-  );
+  const otherWaysBtn = page.getByRole('button', { name: 'Other ways to sign in' })
 
   if (await otherWaysBtn.first().isVisible({ timeout: 7000 }).catch(() => false)) {
     log.info('Clicking "Other ways to sign in"...');
