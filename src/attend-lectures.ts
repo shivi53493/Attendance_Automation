@@ -61,6 +61,7 @@ export async function attendLectures(
 
   log.divider();
 
+  // Print dry-run plan or return
   if (dryRun) {
     log.warn('🧪 DRY RUN MODE — No links will be opened.');
     log.divider();
@@ -70,11 +71,11 @@ export async function attendLectures(
       const stayDuration = getDelayUntil(lecture.endTime);
       if (delay > 0) {
         log.info(
-          `  Would wait ${formatDuration(delay)}, then open: [${lecture.code}] ${lecture.subject} (stay until ${formatTime(lecture.endTime)}, ~${formatDuration(stayDuration)})`
+          `  Would wait ${formatDuration(delay)}, then open in new context: [${lecture.code}] ${lecture.subject} (stay until ${formatTime(lecture.endTime)}, ~${formatDuration(stayDuration)})`
         );
       } else {
         log.info(
-          `  Would open NOW (already started): [${lecture.code}] ${lecture.subject} (stay until ${formatTime(lecture.endTime)}, ~${formatDuration(stayDuration)})`
+          `  Would open NOW in new context (already started): [${lecture.code}] ${lecture.subject} (stay until ${formatTime(lecture.endTime)}, ~${formatDuration(stayDuration)})`
         );
       }
     });
@@ -84,17 +85,14 @@ export async function attendLectures(
     return;
   }
 
-  // Grant camera/mic permissions once up front so Chromium never shows the
-  // native permission bubble on any lecture's pre-join screen.
-  try {
-    await context.grantPermissions(['camera', 'microphone'], {
-      origin: 'https://teams.microsoft.com',
-    });
-  } catch (err) {
-    log.warn(`Could not grant camera/mic permissions: ${err}`);
+  const browser = context.browser();
+
+  // Close the initial LMS tab/page once we start attending lectures if browser is available
+  if (browser && page && !page.isClosed()) {
+    await page.close().catch(() => {});
   }
 
-  // Attend each lecture, reusing the same `page` throughout
+  // Attend each lecture in a fresh browser context
   for (let i = 0; i < upcomingLectures.length; i++) {
     const lecture = upcomingLectures[i];
     const nextLecture = upcomingLectures[i + 1];
@@ -111,14 +109,31 @@ export async function attendLectures(
       await sleep(delayMs);
     }
 
-    // Navigate the same tab into the Teams meeting and auto-join
     log.divider();
-    log.join(`🚀 Joining lecture: [${lecture.code}] ${lecture.subject}`);
+    log.join(`🚀 Creating fresh browser context for lecture: [${lecture.code}] ${lecture.subject}`);
     log.join(`   Time: ${lecture.timing}`);
     log.join(`   Link: ${lecture.link.substring(0, 80)}...`);
 
+    let currentContext: BrowserContext = context;
+    let currentPage: Page = page;
+    let createdNewContext = false;
+
+    if (browser) {
+      currentContext = await browser.newContext();
+      currentPage = await currentContext.newPage();
+      createdNewContext = true;
+
+      try {
+        await currentContext.grantPermissions(['camera', 'microphone'], {
+          origin: 'https://teams.microsoft.com',
+        });
+      } catch (err) {
+        log.warn(`Could not grant camera/mic permissions: ${err}`);
+      }
+    }
+
     try {
-      await joinTeamsMeeting(page, lecture.link, displayName, log);
+      await joinTeamsMeeting(currentPage, lecture.link, displayName, log);
       log.success(`✅ Joined Teams meeting flow for [${lecture.code}] ${lecture.subject}`);
 
       // Calculate remaining duration until lecture end time
@@ -128,7 +143,7 @@ export async function attendLectures(
         log.info(
           `⏳ Staying in the lecture/lobby until end time ${formatTime(lecture.endTime)} (${formatDuration(remainingMs)} remaining)...`
         );
-        await stayInMeetingWithLobbyMonitoring(page, lecture.endTime, log);
+        await stayInMeetingWithLobbyMonitoring(currentPage, lecture.endTime, log);
       } else {
         log.warn(
           `⚠️ Lecture end time (${formatTime(lecture.endTime)}) has already passed. Leaving meeting.`
@@ -136,11 +151,15 @@ export async function attendLectures(
       }
 
       // Leave the meeting / lobby
-      await leaveTeamsMeeting(page, log);
+      await leaveTeamsMeeting(currentPage, log);
     } catch (error) {
       log.error(`Error during Teams meeting for [${lecture.code}]: ${error}`);
-      // Continue to next lecture even if this one fails — the next
-      // joinTeamsMeeting() call will navigate `page` away regardless.
+      // Continue to next lecture even if this one fails
+    } finally {
+      if (createdNewContext) {
+        log.info(`🧹 Closing browser context for lecture [${lecture.code}]...`);
+        await currentContext.close().catch(() => {});
+      }
     }
 
     // Wait until it's time for the next lecture
