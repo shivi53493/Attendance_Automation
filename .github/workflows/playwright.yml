@@ -2,7 +2,8 @@ name: Playwright Weekend Run
 
 on:
   schedule:
-    - cron: '55 3 * * 6,0'   # 9:25 AM IST, every Sat & Sun
+    - cron: '25 9 * * 6,0'
+      timezone: 'Asia/Kolkata'
   workflow_dispatch:
 
 env:
@@ -11,12 +12,15 @@ env:
 jobs:
   student-attendance:
     name: Attendance - ${{ matrix.student }}
-    timeout-minutes: 355      # just under GitHub's 360 min hard cap
+    timeout-minutes: 355
+
     runs-on: ubuntu-latest
+
     strategy:
-      fail-fast: false        # one student's failure doesn't cancel the others
+      fail-fast: false
       matrix:
-        student: [SUE019441]   # placeholder usernames, will confirm exact values
+        student: [SUE019441]
+
     steps:
       - uses: actions/checkout@v4
 
