@@ -592,6 +592,7 @@ async function clickJoinNow(page: Page, displayName: string, log: Logger): Promi
       log.success('✅ Clicked "Join now" button.');
     } catch (err) {
       log.warn(`Click on "Join now" failed: ${err}`);
+      throw new Error(`Click on "Join now" failed: ${err}`);
     }
   }
 
@@ -604,7 +605,8 @@ async function clickJoinNow(page: Page, displayName: string, log: Logger): Promi
   } else if (transition === 'in-meeting') {
     log.success('🎉 Successfully joined the meeting directly!');
   } else {
-    log.warn('Joined status transition settled — assuming joined or waiting in lobby.');
+    log.error('Joined status transition timed out — did not reach meeting or lobby.');
+    throw new Error('Timeout: Did not transition to meeting or lobby after clicking Join now.');
   }
 }
 

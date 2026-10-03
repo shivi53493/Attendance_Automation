@@ -29,8 +29,8 @@ export default defineConfig({
   /* Disable parallel — we run one sequential attendance flow */
   fullyParallel: false,
 
-  /* No retries — attendance is a one-shot flow */
-  retries: 0,
+  /* Restart the complete automation flow from fresh upon failure */
+  retries: 3,
 
   /* Single worker — sequential execution */
   workers: 1,

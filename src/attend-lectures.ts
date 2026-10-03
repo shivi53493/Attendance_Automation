@@ -154,7 +154,8 @@ export async function attendLectures(
       await leaveTeamsMeeting(currentPage, log);
     } catch (error) {
       log.error(`Error during Teams meeting for [${lecture.code}]: ${error}`);
-      // Continue to next lecture even if this one fails
+      // Re-throw the error so the test fails and Playwright retries the whole flow from fresh
+      throw error;
     } finally {
       if (createdNewContext) {
         log.info(`🧹 Closing browser context for lecture [${lecture.code}]...`);
